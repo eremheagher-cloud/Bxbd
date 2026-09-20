@@ -1,4 +1,4 @@
-name: Windows 11 ARM64 - RDP + Tailscale
+name: Windows 11 26H2 ARM64 - RDP + Tailscale
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   deploy-rdp:
-    runs-on: windows-11-arm
+    runs-on: windows-11-vs2026-arm
     timeout-minutes: 360
 
     env:
@@ -24,50 +24,30 @@ jobs:
 
     steps:
 
-      - name: Verificar Windows atual
+      - name: Verificar Windows 11 26H2 ARM64
         shell: powershell
         run: |
           Write-Host "=========================================="
-          Write-Host " WINDOWS ATUAL"
+          Write-Host " WINDOWS 11 26H2 ARM64"
           Write-Host "=========================================="
 
-          Get-ComputerInfo |
-            Select-Object WindowsProductName,
-                          WindowsVersion,
-                          OsBuildNumber
+          $os = Get-CimInstance Win32_OperatingSystem
+          $computer = Get-ComputerInfo
 
-          Write-Host ""
+          Write-Host "Produto: $($os.Caption)"
+          Write-Host "Versão: $($computer.WindowsVersion)"
+          Write-Host "Build: $($os.BuildNumber)"
           Write-Host "Arquitetura: $env:PROCESSOR_ARCHITECTURE"
 
-      - name: Procurar atualizações do Windows
-        shell: powershell
-        run: |
-          Write-Host "=========================================="
-          Write-Host " WINDOWS UPDATE"
-          Write-Host "=========================================="
+          if ([int]$os.BuildNumber -lt 26200) {
+            Write-Host ""
+            Write-Host "ERRO: o runner não está no build esperado do Windows 11 26H2."
+            Write-Host "Build encontrado: $($os.BuildNumber)"
+            exit 1
+          }
 
-          Set-Service wuauserv `
-            -StartupType Automatic `
-            -ErrorAction SilentlyContinue
-
-          Start-Service wuauserv `
-            -ErrorAction SilentlyContinue
-
-          try {
-            UsoClient.exe StartScan
-          } catch {}
-
-          Start-Sleep -Seconds 10
-
-          try {
-            UsoClient.exe StartDownload
-          } catch {}
-
-          Start-Sleep -Seconds 10
-
-          try {
-            UsoClient.exe StartInstall
-          } catch {}
+          Write-Host ""
+          Write-Host "Windows 11 26H2 detectado."
 
       - name: Configurar RDP
         shell: powershell
@@ -116,8 +96,11 @@ jobs:
             -Action Allow `
             -ErrorAction SilentlyContinue
 
-          Set-Service TermService -StartupType Automatic
-          Start-Service TermService -ErrorAction SilentlyContinue
+          Set-Service TermService `
+            -StartupType Automatic
+
+          Start-Service TermService `
+            -ErrorAction SilentlyContinue
 
       - name: Configurar usuário Rafael
         shell: powershell
@@ -248,7 +231,6 @@ jobs:
           Write-Host " CONFIGURANDO DATA E HORA"
           Write-Host "=========================================="
 
-          # Define o fuso horário de Brasília
           tzutil /s "E. South America Standard Time"
 
           Set-Service W32Time `
@@ -258,23 +240,23 @@ jobs:
           Start-Service W32Time `
             -ErrorAction SilentlyContinue
 
-          # Configura o servidor NTP
           w32tm /config `
             /manualpeerlist:"time.windows.com" `
             /syncfromflags:manual `
             /update
 
-          # Reinicia o serviço para aplicar a configuração
           Restart-Service W32Time `
             -Force `
             -ErrorAction SilentlyContinue
 
           Start-Sleep -Seconds 3
 
-          # Tenta sincronizar sem passar argumentos inválidos ao w32tm
-          $syncResult = & w32tm /resync /force 2>&1
-
-          Write-Host $syncResult
+          try {
+            w32tm /resync /force
+          }
+          catch {
+            Write-Host "Sincronização inicial não foi concluída."
+          }
 
           Write-Host ""
           Write-Host "Fuso horário atual:"
@@ -291,12 +273,11 @@ jobs:
           Write-Host " WINDOWS FINAL"
           Write-Host "=========================================="
 
-          Get-ComputerInfo |
-            Select-Object WindowsProductName,
-                          WindowsVersion,
-                          OsBuildNumber
+          $os = Get-CimInstance Win32_OperatingSystem
 
-          Write-Host ""
+          Write-Host "Produto: $($os.Caption)"
+          Write-Host "Versão: $((Get-ComputerInfo).WindowsVersion)"
+          Write-Host "Build: $($os.BuildNumber)"
           Write-Host "Arquitetura: $env:PROCESSOR_ARCHITECTURE"
 
       - name: Mostrar dados do RDP
