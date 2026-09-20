@@ -1,0 +1,331 @@
+name: Windows 11 ARM64 - RDP + Tailscale
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_number:
+        description: "Número da instância (1-10)"
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-rdp:
+    runs-on: windows-11-arm
+    timeout-minutes: 360
+
+    env:
+      TS_HOSTNAME: enigmano${{ github.event.inputs.instance_number }}
+      RDP_USER: Rafael
+      RDP_PASSWORD: rafael34
+
+    steps:
+
+      - name: Verificar Windows atual
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host " WINDOWS ATUAL"
+          Write-Host "=========================================="
+
+          Get-ComputerInfo |
+            Select-Object WindowsProductName,
+                          WindowsVersion,
+                          OsBuildNumber
+
+          Write-Host ""
+          Write-Host "Arquitetura: $env:PROCESSOR_ARCHITECTURE"
+
+      - name: Procurar atualizações do Windows
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host " WINDOWS UPDATE"
+          Write-Host "=========================================="
+
+          Set-Service wuauserv `
+            -StartupType Automatic `
+            -ErrorAction SilentlyContinue
+
+          Start-Service wuauserv `
+            -ErrorAction SilentlyContinue
+
+          try {
+            UsoClient.exe StartScan
+          } catch {}
+
+          Start-Sleep -Seconds 10
+
+          try {
+            UsoClient.exe StartDownload
+          } catch {}
+
+          Start-Sleep -Seconds 10
+
+          try {
+            UsoClient.exe StartInstall
+          } catch {}
+
+      - name: Configurar RDP
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host " CONFIGURANDO RDP"
+          Write-Host "=========================================="
+
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" `
+            -Value 0
+
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "SecurityLayer" `
+            -Value 0
+
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "PortNumber" `
+            -Value 3389
+
+          Enable-NetFirewallRule `
+            -DisplayGroup "Remote Desktop" `
+            -ErrorAction SilentlyContinue
+
+          New-NetFirewallRule `
+            -DisplayName "RDP TCP 3389" `
+            -Direction Inbound `
+            -Protocol TCP `
+            -LocalPort 3389 `
+            -Action Allow `
+            -ErrorAction SilentlyContinue
+
+          New-NetFirewallRule `
+            -DisplayName "RDP UDP 3389" `
+            -Direction Inbound `
+            -Protocol UDP `
+            -LocalPort 3389 `
+            -Action Allow `
+            -ErrorAction SilentlyContinue
+
+          Set-Service TermService -StartupType Automatic
+          Start-Service TermService -ErrorAction SilentlyContinue
+
+      - name: Configurar usuário Rafael
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host " CONFIGURANDO RAFAEL"
+          Write-Host "=========================================="
+
+          $password = ConvertTo-SecureString `
+            "$env:RDP_PASSWORD" `
+            -AsPlainText `
+            -Force
+
+          $user = Get-LocalUser `
+            -Name "$env:RDP_USER" `
+            -ErrorAction SilentlyContinue
+
+          if (-not $user) {
+            New-LocalUser `
+              -Name "$env:RDP_USER" `
+              -Password $password `
+              -FullName "Rafael" `
+              -Description "Conta RDP"
+          }
+          else {
+            Set-LocalUser `
+              -Name "$env:RDP_USER" `
+              -Password $password
+
+            Enable-LocalUser `
+              -Name "$env:RDP_USER"
+          }
+
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member "$env:RDP_USER" `
+            -ErrorAction SilentlyContinue
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "$env:RDP_USER" `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "Usuário Rafael configurado."
+
+      - name: Configurar Windows Desktop
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host " CONFIGURANDO DESKTOP"
+          Write-Host "=========================================="
+
+          $winlogon =
+            "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+
+          Set-ItemProperty `
+            -Path $winlogon `
+            -Name "Shell" `
+            -Value "explorer.exe"
+
+          Set-ItemProperty `
+            -Path $winlogon `
+            -Name "Userinit" `
+            -Value "C:\Windows\System32\userinit.exe,"
+
+          Stop-Process `
+            -Name explorer `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          Start-Sleep -Seconds 2
+
+          Start-Process explorer.exe
+
+      # ==========================================================
+      # TAILSCALE - AUTH KEY
+      # ==========================================================
+      - name: Conectar Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          version: latest
+          use-cache: true
+
+      - name: Configurar Tailscale
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host " TAILSCALE"
+          Write-Host "=========================================="
+
+          $tailscale = Get-Command tailscale.exe `
+            -ErrorAction SilentlyContinue
+
+          if (-not $tailscale) {
+            Write-Host "Tailscale não foi encontrado."
+            exit 1
+          }
+
+          & $tailscale.Source set `
+            --hostname="$env:TS_HOSTNAME"
+
+          Start-Sleep -Seconds 5
+
+          $ip = (& $tailscale.Source ip -4).Trim()
+
+          if ([string]::IsNullOrWhiteSpace($ip)) {
+            Write-Host "Não foi possível obter o IP Tailscale."
+            & $tailscale.Source status
+            exit 1
+          }
+
+          "TAILSCALE_IP=$ip" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+          Write-Host ""
+          Write-Host "Tailscale conectado."
+          Write-Host "Hostname: $env:TS_HOSTNAME"
+          Write-Host "IP: $ip"
+
+      - name: Configurar data e hora
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host " CONFIGURANDO DATA E HORA"
+          Write-Host "=========================================="
+
+          # Define o fuso horário de Brasília
+          tzutil /s "E. South America Standard Time"
+
+          Set-Service W32Time `
+            -StartupType Automatic `
+            -ErrorAction SilentlyContinue
+
+          Start-Service W32Time `
+            -ErrorAction SilentlyContinue
+
+          # Configura o servidor NTP
+          w32tm /config `
+            /manualpeerlist:"time.windows.com" `
+            /syncfromflags:manual `
+            /update
+
+          # Reinicia o serviço para aplicar a configuração
+          Restart-Service W32Time `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          Start-Sleep -Seconds 3
+
+          # Tenta sincronizar sem passar argumentos inválidos ao w32tm
+          $syncResult = & w32tm /resync /force 2>&1
+
+          Write-Host $syncResult
+
+          Write-Host ""
+          Write-Host "Fuso horário atual:"
+          tzutil /g
+
+          Write-Host ""
+          Write-Host "Data e hora:"
+          Get-Date
+
+      - name: Mostrar versão final
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host " WINDOWS FINAL"
+          Write-Host "=========================================="
+
+          Get-ComputerInfo |
+            Select-Object WindowsProductName,
+                          WindowsVersion,
+                          OsBuildNumber
+
+          Write-Host ""
+          Write-Host "Arquitetura: $env:PROCESSOR_ARCHITECTURE"
+
+      - name: Mostrar dados do RDP
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host " ACESSO RDP"
+          Write-Host "=========================================="
+
+          Write-Host "PC: $env:TAILSCALE_IP"
+          Write-Host "Porta: 3389"
+          Write-Host "Usuário: $env:RDP_USER"
+          Write-Host "Senha: $env:RDP_PASSWORD"
+
+      - name: Manter runner ativo
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host " SESSÃO ATIVA"
+          Write-Host "=========================================="
+
+          $counter = 0
+
+          while ($true) {
+            $counter++
+
+            Write-Host `
+              "Session active - Heartbeat #$counter - IP=$env:TAILSCALE_IP"
+
+            Start-Sleep -Seconds 60
+          }
